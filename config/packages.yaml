@@ -32,26 +32,64 @@ minimal:
     - subversion
     - mercurial
     - bzr
-    - darcs
+    #- darcs # pulls in postfix mail configuration.
   build:
-    - make
+    - bsdmainutils
+    - clang
+    - cmake
     - gcc
     - g++
     - gfortran
+    - libtool
+    - make
     - patch
-    - cmake
-    - swig
+    - pkg-config
   util:
     - axel
-    - rsync
+    - gawk
     - openssh-server
+    - pigz
+    - rsync
     - screen
     - unzip
-    - tar
     - less
   network:
     - curl
     - wget
+libraries:
+  - libatlas-base-dev
+  #- libatlas-dev
+  - libblas-dev
+  - liblapack-dev
+  - libeigen3-dev
+  - libc6-dev
+  - libzip-dev
+  - libbz2-dev
+  - zlib1g-dev
+  - libcurl4-openssl-dev
+  - libgsl-dev
+  - libgsl2
+  - gsl-bin
+  - mime-support
+  - libncurses5-dev
+  - libpcre3-dev
+  - libpng12-dev
+  - libreadline-dev
+  - libssl-dev
+  - uuid
+  - uuid-dev
+  - libxml2
+  - libxml2-dev
+  - libxslt1-dev
+  - libxslt1.1
+  - xz-utils
+  - liblzma-dev
+  - zlib1g-dev
+  - libnetcdf-dev
+documentation:
+  - texlive-latex-base
+  - texlive-latex-recommended
+  - texlive-latex-extra
 desktop:
   #Packages to support a remote desktop
   all:
@@ -59,14 +97,12 @@ desktop:
     - gnome-system-tools
     - synaptic
     - software-center
-    - freenx-server
+    #- freenx-server  # Gone on 14.04
     - gnome-backgrounds
     - gnome-terminal
     - firefox
     - evince
     - ubuntu-desktop
-    - cloudbl-desktop
-    - bio-linux-tutorials
     - xvfb
     - gdm
   # NX compatible window managers on Ubuntu 11.10+
@@ -86,52 +122,17 @@ programming:
     - emacsen-common
     - exuberant-ctags
     - gedit
-  documentation:
-    - texlive-latex-base
-    - texlive-latex-recommended
-    - texlive-latex-extra
   build:
-    - swig
-    - cmake
-    - libcurl4-openssl-dev
-    - libxml2
-    - libxml2-dev
-    - libxslt1-dev
-    - libxslt1.1
-    - libgsl0-dev
-    - libgsl0ldbl
-    - gsl-bin
-    - xfsprogs
-    - libc6-dev
-    - libzip-dev
-    - libbz2-dev
-    - zlib1g-dev
-    - xz-utils
-    - liblzma-dev
     - libgtk2.0-dev
-    - libncurses5-dev
-    - zlib1g-dev
-    - libssl-dev
-    - libpcre3
-    - libpcre3-dev
-    - libreadline-dev
-    - mime-support
-    - gcc
-    - g++
-    - gfortran
-    - stow
-    - rsync
-    - python-software-properties
     - protobuf-compiler
+    - python-software-properties
+    - stow
+    - swig
+    - rsync
+    - xfsprogs
   filesystem:
     - libfuse-dev
-    - fuse-utils
   libraries:
-    - libatlas-base-dev
-    #- libatlas-dev
-    - libblas-dev
-    - liblapack-dev
-    - libeigen3-dev
     - tcl-dev
     - tk-dev
     - imagemagick
@@ -141,7 +142,6 @@ programming:
     - libboost-dev
     - libboost-python-dev
     - libboost-thread-dev
-    - libgd2-xpm
     - libgd2-xpm-dev
     - libgnomecanvas2-0
     - libgnomecanvas2-dev
@@ -160,7 +160,7 @@ programming:
     - pbuilder
     - unzip
   virtual:
-    - virtualbox-4.1
+    #- virtualbox-4.2
     - dkms
   util:
     - mc
@@ -175,23 +175,12 @@ programming:
     - aspell
     - dictionaries-common
     - libaspell-dev
-# Note that the following Cloudera hadoop installation is for test
-# purposes "inside the instance" only, Amazon already provides a
-# production-ready Elastic MapReduce platform:
-# http://aws.amazon.com/elasticmapreduce/
 distributed:
   all:
     - rabbitmq-server
     - nfs-kernel-server
     - nfs-common
-    - hadoop-0.20
-    - hadoop-pig
-    - hadoop-hive
-    - libhdfs0-dev
-    - hadoop-0.20-pipes
-    - hadoop-0.20-source
     - libopenmpi-dev
-    - libopenmpi1.3
     - openmpi-bin
     - libzmq-dev
     - libfuse-dev
@@ -203,54 +192,48 @@ distributed:
 amazon:
   - s3cmd
   - euca2ools
-  - ec2-ami-tools
-  - ec2-api-tools
-  - python-vm-builder-ec2
 python:
-  meta:
-    - python
-    - python-dev
-    - python-setuptools
-    - python-distutils-extra
-    - python3
-    - python3-dev
-    - python-pip
-  wrappers:
-    - python-rpy
+  - python
+  - python-dev
+  - python-distutils-extra
+  - python-pip
+  - python-setuptools
+  - python-virtualenv
+  - python3
+  - python3-dev
+  - python-rpy
 ruby:
   - ruby1.9.1 # default Ruby install
   - ruby1.9.1-dev
-  - ruby1.8
-  - ruby1.8-dev
 r:
   - r-base
   - r-base-core
   - r-base-dev
-  - r-base-html
 perl:
-  - perl-base
   - perl
   - libperl-dev
   - perl-modules
   - perl-tk
   - parrot
   - parrot-devel
+  - cpanminus
+  - libextutils-autoinstall-perl
 java:
   # - sun-java6-bin # Sun Java removed from Ubuntu package repositories
   # - sun-java6-jre # Package 'sun-java6-jre' has no installation candidate
   # - sun-java6-jdk Package 'sun-java6-jdk' has no installation candidate
-  - openjdk-6-jdk
-  - openjdk-6-jre
   - openjdk-7-jdk
   - openjdk-7-jre
+java_extras:
+  - openjdk-6-jdk
+  - openjdk-6-jre
   - ant
   - libbiojava-java
   - libbiojava-java-demos
-  - eclipse
-  - maven2
+  #- eclipse
+  - maven
   - libjline-java
   - libjhdf5-java
-  - clojure
   - jruby
   - jython
   - scala
@@ -263,7 +246,7 @@ erlang:
   - erlang-manpages
   - erlang-mode
 haskell:
-  - ghc6
+  - ghc
   - cabal-install
   - c2hs
 databases:
@@ -271,12 +254,12 @@ databases:
     - mysql-client
     - mysql-common
     - mysql-server
-    - libmysqlclient15-dev
+    - libmysqlclient-dev
   postgres:
     - postgresql
     - postgresql-client
-    - postgresql-plpython-8.4
-    - postgresql-plperl-8.4
+    - postgresql-plpython
+    - postgresql-plperl
     - libpq-dev
   sqlite:
     - libsqlite0
@@ -286,17 +269,15 @@ databases:
     - sqlite3
   document:
     - libdb-dev
-    - mongodb-10gen
+    - mongodb
     - couchdb
     - tokyocabinet-bin
-    - libtokyocabinet8
     - libtokyocabinet-dev
   hdf:
-    - libhdf5-serial-1.8.4
     - libhdf5-serial-dev
 math:
   - prover9
-  - octave3.2
+  - octave
 viz:
   - imagemagick
   - x11-apps
@@ -317,93 +298,98 @@ boinc:
   - boinc-manager
 bio_general:
   - primer3
-  - readseq
-  - bio-linux-xcut
-  - emboss
-  - emboss-data
-  - emboss-lib
-  - jemboss
   - ugene
-  # - bio-linux-taverna # Broken graphviz dependency
 bio_search:
   - blast2
-  - hmmer
   - ncbi-tools-bin
-  - bio-linux-blast+
-  - bio-linux-blixem
-  - bio-linux-fasta
-  - bio-linux-mspcrunch
-  - bio-linux-mview
-  - bio-linux-nrdb
+  - cdbfasta
 bio_alignment:
-  - clustalw
   - exonerate
   - mafft
   - muscle
-  - mummer
   - probcons
-  - t-coffee
-  - bio-linux-seaview
-  - bio-linux-clustal # Version problem
-  - bio-linux-dotter
-  - bio-linux-jalview # Version problem
-  - bio-linux-pfaat
-  - bio-linux-prank
-  - bio-linux-squint
-  - bio-linux-wise2
+  - wise
 bio_nextgen:
   - fastx-toolkit
   - maq
   - plink
   - last-align
   - tabix
-  # - samtools # very old version
+  # - samtools # only on 0.18, prefer custom build
 bio_sequencing:
-  - bio-linux-assembly-conversion-tools
-  - bio-linux-cap3
-  - bio-linux-dust
-  - bio-linux-lucy
-  - bio-linux-staden
-  - bio-linux-stars
-  # Install problems with emboss: - bio-linux-msatfinder
-  #- bio-linux-mira # need mira-assembler but gone from repo
-  #- bio-linux-mira-3rd-party
 bio_annotation:
   - mcl
+  - predictprotein
   - tigr-glimmer
-  - bio-linux-artemis
-  - bio-linux-big-blast
-  - bio-linux-cd-hit
-  - bio-linux-estscan
-  - bio-linux-glimmer3
-  - bio-linux-partigene
-  - bio-linux-prot4est
-  - bio-linux-rbs-finder
-  - bio-linux-transterm-hp
-  - bio-linux-trnascan
-  - bio-linux-tetra
-  # Conflict: - bio-linux-act
-  # 500Mb of disk: - bio-linux-priam
-  # Package broken: - bio-linux-yamap
+bio_markergenes:
+  - ampliconnoise
+  - mothur
+  - rdp-classifier
+  - qiime
 bio_microarray:
-  - bio-linux-ocount
-  - bio-linux-oligoarray
-  - bio-linux-oligoarrayaux
 bio_visualization:
   - rasmol
-  - bio-linux-clcsequenceviewer
-  - bio-linux-maxd
+bio_proteomics:
+  all:
+    # Required for protk
+    - libxml2-dev
+    - libreadline-dev
+    - libxslt-dev
+
+    # Required for protvis
+    - python-virtualenv
+    - python-setuptools
+    - libpng12-dev
+    - python-dev
+    - libexpat1-dev
+    - libboost-dev
+
+    # Needed for TPP
+    - xsltproc
+    - libxml-sax-expat-perl
+    - libgd2-xpm-dev
+    - libbz2-dev
+    - gnuplot
+
+    # Needed for percolator
+    - libxerces-c3.1
+    - libxerces-c-dev
+    - xsdcxx
+    - libboost-dev
+    - libboost-filesystem-dev
+    - libboost-system-dev
+    - libsqlite3-0
+    - libboost-serialization-dev
+    - zlib1g-dev
+    - libboost-dev
+
+    # needed for 32bit execs distributed with searchgui.
+    # - ia32-libs ## Doesn't play well with dependencies of gnuplot, TODO: Find more specific lib.
+
+    # needed for building OpenMS
+    - libtool
+    - qt4-dev-tools
+    - libqtwebkit-dev
+    - libqtwebkit4
+
+     # Needed for psm-eval
+    - libyaml-dev
+
+    # Needed for RVM
+    - libbison-dev
+    - ncurses-dev
+    - automake
+    - libtool
+    - bison
+    - subversion
+    - libgdbm-dev
+    - libffi-dev
+    - libsqlite3-dev
+    - sqlite3
+
+bio_proteomics_wine:
+  - wine
 bio_utils:
-  - bio-linux-das-prep
-  - bio-linux-exchanger
-  - bio-linux-genquery
-  - bio-linux-keyring
-  - bio-linux-base-directories
-  - bio-linux-bldp-files
-  - bio-linux-sampledata
-  - bio-linux-sequin # Version problem
-  - bio-linux-taxinspector
-  - bio-linux-themes-v5
 phylogeny_testing:
   # new packages in testing (Debian 'wheezy')
   all:
@@ -416,33 +402,13 @@ phylogeny_experimental:
     - paml        # should replace biolinux-paml
 phylogeny:
   all:
-    - phylip
     - phyml
     - mrbayes
     - njplot
     - tree-puzzle
-    - bio-linux-arb
-    # biolinux-ape package is source (i386). It needs R - not in deps - and
-    # /usr/local/bioinf/ape# R CMD INSTALL ape (FIXME)
-    # - bio-linux-ape
-    - bio-linux-coalesce
-    - bio-linux-dendroscope
-    - bio-linux-fastDNAml # Version problem
-    - bio-linux-fluctuate
-    - bio-linux-forester
-    - bio-linux-happy
-    - bio-linux-mesquite
-    - bio-linux-migrate
-    - bio-linux-mrbayes-multi
-    #- bio-linux-mothur
-    - bio-linux-paml
-    - bio-linux-omegamap
-    - bio-linux-qtlcart
-    - bio-linux-recombine
-    - bio-linux-splitstree
-    - bio-linux-treeview # Version problem
+    - treeviewx
   needs_64bit:
-    - bio-linux-fasttree
+    - fasttree
 ## Package lists imported from mi-deployment.
 cloudman:
   all:
@@ -452,8 +418,8 @@ cloudman:
     - rabbitmq-server
     # Required to handle data volumes (including LVM support)
     - lvm2
-    - dmsetup 
-    - mdadm
+    - dmsetup
+    # - mdadm
     - reiserfsprogs
     - xfsprogs
     # Required to compile nginx
@@ -473,17 +439,23 @@ cloudman:
     # Needed to enable updates for Galaxy
     # - mercurial ## Included in minimal
     # Required for compiling ProFTPd (must match installed PostgreSQL version!)
-    - postgresql-server-dev-9.1
+    - postgresql-server-dev-9.5
     # Actually not sure what of the following is really needed
     - libboost-all-dev
     - libreadline6-dev
     # Required for s3fs
     - libfuse-dev
+    - libfuse2
     - pkg-config
-    - fuse-utils
     - libcurl4-openssl-dev
     - libxml2-dev
-    - mime-support    
+    - mime-support
+    # Required for novnc
+    - vnc4server
+    - glusterfs-client
+  ubuntu_quantal:
+    # Required to get HTCondor, not available on 12.04 (latest LTS release).
+    - condor
 galaxy:
   all:
     - postgresql
@@ -491,8 +463,6 @@ galaxy:
     - default-jdk
     - python-rpy
     - xvfb
-    # Parallel file download (used by the Galaxy ObjectStore)
-    - axel
     # Required by Freebayes
     - cmake
     # Required by BWA
@@ -501,13 +471,8 @@ galaxy:
     - libncurses5-dev
     # Required by Compute q-values
     - liblzma-dev
-    - r-base
-    - r-base-core
-    - r-base-dev
-    - r-cran-lattice
-    - r-cran-qvalue
-    # Required by HVIS
-    - r-bioc-hilbertvis
+    # Parallel file download (used by the Galaxy ObjectStore)
+    - axel
     # Required by various R modules
     - tcl-dev
     # Required by various R modules
@@ -518,25 +483,91 @@ galaxy:
     - python-scipy
     - libsparsehash-dev
 
-# To do -- in Deb Med but not propogated
-# squizz
-# biomaj
-#
-# To Add -- need packages
-# from bioperl-max:
-#   hyphy
-#   bioperl-db
-#   more perl modules
-# from bio-linux:
-#   Celera Assembler
-#   lamarc - not available just now (22/6/10)
-#   peptidemapper
-#   pftools
-#   transterm
-# Others:
-#   mdust
-#   IGV
-#   trimpoly
-#   blast2go
-#   sputnik: microsattelites
-#   GenomeView
+    # Latest python-rpy not currently compatible with R 3.0.1 at least on precise (presumably
+    # quantal as well), hack below is to specify an older version of R compabile with python-rpy.
+    #- r-base
+    #- r-base-core
+    #- r-base-dev
+    - r-cran-lattice
+    - r-cran-qvalue
+    # Required by HVIS
+    - r-bioc-hilbertvis
+  ubuntu_quantal:
+    - "r-base-core=3.0.0-2quantal"
+    - "r-base-dev=3.0.0-2quantal"
+  ubuntu_precise:
+    - "r-base-core=3.0.0-2precise"
+    - "r-base-dev=3.0.0-2precise"
+galaxyp:
+  all:
+     # Required for protk
+     - libxml2-dev
+     - libreadline-dev
+     - libxslt-dev
+
+     # Required for protvis
+     - python-virtualenv
+     - python-setuptools
+     - libpng12-dev
+     - python-dev
+     - libexpat1-dev
+     - libboost-dev
+
+     # Needed for TPP
+     - xsltproc
+     - libxml-sax-expat-perl
+     - libgd2-xpm-dev
+     - libbz2-dev
+     - gnuplot
+
+     # Needed for percolator
+     - libxerces-c3.1
+     - libxerces-c-dev
+     - xsdcxx
+     - libboost-dev
+     - libboost-filesystem-dev
+     - libboost-system-dev
+     - libsqlite3-0
+     - libboost-serialization-dev
+     - zlib1g-dev
+     - libboost-dev
+
+     # needed for 32bit execs distributed with searchgui.
+     # - ia32-libs ## Doesn't play well with dependencies of gnuplot, TODO: Find more specific lib.
+
+     # needed for building OpenMS
+     - libtool
+     - qt4-dev-tools
+     - libqtwebkit-dev
+     - libqtwebkit4
+
+     # Needed for nbic galaxy database utilities
+     - liblog-log4perl-perl
+     - libswiss-perl
+
+     # Needed  for psm-eval
+     - libyaml-dev
+
+     # Needed for RVM
+     - libbison-dev
+     - ncurses-dev
+     - automake
+     - libtool
+     - bison
+     - subversion
+     - libgdbm-dev
+     - libffi-dev
+     - libsqlite3-dev
+     - sqlite3
+
+nginx:
+  - nginx
+
+rabbitmq:
+  - rabbitmq-server
+
+supervisor:
+  - supervisor
+
+coffeescript:
+  - coffeescript

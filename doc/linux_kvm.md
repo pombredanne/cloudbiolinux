@@ -1,9 +1,18 @@
 # CloudBioLinux and Linux KVM
 
 This document gives some additional information on using BioLinux on Linux KVM.
+KVM is a great virtualization environment, it is part of the Linux effort, will
+work with the default Linux kernel. A running 64-bit Linux kernel can run both
+32-bit and 64-bit VMs.  With most Linux distributions KVM comes out of the
+box...
 
-In conjunction with the BioLinux fabric environment, any KMV VM can be
-bootstrapped.
+Together with the BioLinux fabric environment, any KMV VM can be
+bootstrapped. Here we start from a bare Debian/Ubuntu
+installation. With Debian you can install from a fresh download of
+[stable](http://www.debian.org/releases/stable/) version burning it on
+a CDROM.  The default install will do on, say, a 10GB partition - so
+the rest can be used for LVM partitioning. Select ssh and the standard
+system utilities.
 
 # Install KVM
 
@@ -14,61 +23,95 @@ There are many web resources for installing KVM. On Debian derived systems:
 
 and add your user to the kvm group. E.g.
 
-      adduser user kvm
-  
+    adduser username kvm
+
+For non-Debian systems see, for example, [OpenSuse](http://doc.opensuse.org/documentation/html/openSUSE/opensuse-kvm/cha.kvm.requires.html).
+
+Note that not all machines support virtualization, and if they do you
+may need to switch it on in the BIOS (especially true on older
+hardware). Check for CPU support with:
+
+    egrep --color '(vmx|svm)' /proc/cpuinfo
+
+Also note that some older Linux installations may need a kernel
+upgrade. Start KVM with
+
+    /etc/init.d/qemu-kvm start
+
+or with later versions
+
+    /etc/init.d/qemu-system-x86 start
+
 # Create a bare VM
 
-Download a live installation image file. For example from
+Download a live installation image file. For example fetch a standard
+or network image from [[http://www.debian.org/][Debian]].
 
-  http://cdimage.debian.org/cdimage/release/current-live/i386/usb-hdd/debian-live-$(VER)-i386-standard.img
-  
-Next reserve space on your disk partition (note, do not use qemu on an ext4 partition)
+Reserve space on the disk partition - this should be enough for a
+Debian install and updates.
 
-      qemu-img create hda.img -opreallocation=metadata -ocluster_size=2M -f qcow2 4G
+      qemu-img create hda.img -opreallocation=metadata -ocluster_size=2M -f qcow2 10G
 
-(settings suggested by [http://docs.redhat.com/docs/en-US/Red_Hat_Enterprise_Linux/6/html/Technical_Notes/virt.html][redhat]) and fire up the VM
+(settings suggested by Red Hat) and fire up the VM
 
-      kvm debian-live-$(VER)-i386-standard.img -hda hda.img -curses -no-reboot -serial pty
+      kvm debian-live-$(VER).img -hda hda.img -curses -no-reboot -serial pty
 
-The CloudBioLinux integration test system does something similar, starting from
-the smaller net install of Debian Linux:
+Alternatively use the netinstall. The CloudBioLinux integration test
+system does something similar, starting from the smaller net install
+of Debian Linux:
 
-      wget http://cdimage.debian.org/debian-cd/6.0.3/amd64/iso-cd/debian-6.0.3-amd64-netinst.iso
-      qemu-system-x86_64 -cdrom debian-6.0.3-amd64-netinst.iso -hda hda.img
+      qemu-system-x86_64 -enable-kvm -cdrom debian-$(VER)-amd64-netinst.iso -hda hda.img
 
-hit ESC and type 'install fb=false'. This will fire up the installer. With the
-base install, boot the new system 
+hit ESC and optionally type 'install fb=false' to disable the frame buffer.
+Fire up the installer. Note that the file system of the installer can be slow,
+that speed is not representative for an installed VM later (with -enable-kvm).
+
+With the base install, boot the new system
 
       qemu-system-x86_64 -enable-kvm -redir tcp:2222::22 -hda hda.img
 
-and set up ssh on the VM
+and install ssh on the VM (it comes already on netinst)
 
       apt-get install openssh-server
 
-so this works
+so that ssh login works
 
       ssh -p 2222 biolinux@localhost
 
-so it can be used on a user without a password (preferably using a key with
-empty password). Also give that use 'sudo bash'. This ssh and sudo
-configuration is described in ./doc/private_cloud.md.
+on user biolinux without a password (preferably using a key with
+empty password). And give that user 'sudo bash'. This ssh and sudo
+configuration is described in ./doc/private_cloud.md. After generating
+the key 
 
-From that point onwards you can install CloudBioLinux using the fabric file.
+      ssh -i ~/.ssh/biolinux -p 2222 biolinux@localhost
 
-This is also the image the test system fingerprints for further test installs.
+test run sudo without a password
 
-You can try the ./test/test_biolinux script to test drive the VM. test_biolinux
+      sudo bash
+
+Not much to installing Linux with KVM! From this point onwards you can install
+CloudBioLinux using the fabric file. Make a copy of the hda.img file,
+so you can have the same starting point every time
+
+      cp hda.img kvm_with_biolinux_login.img
+
+The CloudBioLinux test script also starts from here.
+Try the ./test/test_biolinux script to test drive the VM. test_biolinux
 will install a CloudBioLinux flavor, and check whether the installation is
-complete. Essentially with a running instance
+complete. Essentially with a running instance:
 
-      ./test/test_biolinux -p 2222 -u biolinux 127.0.0.1
+      ./test/test_biolinux -p 2222 -u biolinux -i ~/.ssh/biolinux 127.0.0.1
 
 (note the use of 127.0.0.1 over localhost - this is because of a bug
-in fabric).
+in fabric - is this still true?).
 
 # KVM tips
 
-KVM is powerful. Performance-wise it pays to install on a raw (LVM) partition,
+KVM is nice and powerful. It is used in many Cloud service providers.
+
+For fast performance, it pays to install on a raw (LVM) partition,
 get bridging sorted, and make sure hardware acceleration is in place.
 Interesting goodies are the monitor (Crtl-Alt-2), virtsh, etc. See also
 [http://www.linux-kvm.org/page/FAQ][kvm tips].
+
+[kvm tips]: http://www.linux-kvm.org/page/FAQ

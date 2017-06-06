@@ -17,7 +17,8 @@
 #   ./test/test_biolinux --help
 #   ./test/test_biolinux --list
 #
-# See also the hacking documents in ./doc/
+# Easiest is to create a Host entry in ./ssh/config. See also the hacking
+# documents in ./doc/
 
 require 'rubygems'
 require 'yaml'
@@ -35,20 +36,20 @@ end
 CONFIG = <<EOCONFIG
 ---
 Minimal:
-  :fabricrc: contrib/minimal/fabricrc_debian.txt
-  :packagelist: contrib/minimal/main.yaml
+  :fabricrc: contrib/flavor/minimal/fabricrc_debian.txt
+  :packagelist: contrib/flavor/minimal
 Boinc:     
   # Boinc is a Minimal flavor for running Boinc clients
   :fabricrc:    contrib/flavor/boinc/fabricrc_debian.txt
-  :packagelist: contrib/flavor/boinc/main.yaml
+  :packagelist: contrib/flavor/boinc
 Phylogeny:  
   # Phylogeny is a Minimal flavor for running Phylogenetic software in the Cloud
   :fabricrc:    contrib/flavor/phylogeny/fabricrc_debian.txt
-  :packagelist: contrib/flavor/phylogeny/main.yaml
+  :packagelist: contrib/flavor/phylogeny
   :call_test:   test_phylogeny_flavor
 BioNode: 
   :fabricrc:    contrib/bionode/fabricrc_bionode.txt
-  :packagelist: contrib/bionode/main.yaml
+  :packagelist: contrib/bionode
 EOCONFIG
 
 config = YAML::load(CONFIG)
@@ -76,7 +77,7 @@ if ARGV.index('--list')
   exit 0
 end
 
-if ARGV.size == 0 or ARGV.index('-h') or ARGV.index('--help')
+if ARGV.index('-h') or ARGV.index('--help')
   print <<USAGE
 
     Note this testing framework is under development, and is meant to
@@ -86,7 +87,7 @@ if ARGV.size == 0 or ARGV.index('-h') or ARGV.index('--help')
 
     test_biolinux [-i key] [-u user] hostname [flavor]
 
-  Where hostname can be a (local) IP address.
+  Where hostname can be a (local) IP address or an entry in ~/.ssh/config.
 
   Options:
 
@@ -104,7 +105,7 @@ if ARGV.size == 0 or ARGV.index('-h') or ARGV.index('--help')
 
        cd ~/my_test_vms/
 
-     test Minimal edition - this will pull the remote box to local disk once
+     test Minimal flavor - this will pull the remote box to local disk once
 
        $cloudbiolinux/test/test_biolinux -u biolinux 10.0.2.1 Minimal
 
@@ -112,10 +113,14 @@ if ARGV.size == 0 or ARGV.index('-h') or ARGV.index('--help')
 
        $cloudbiolinux/test/test_biolinux -u biolinux 10.0.2.1 Minimal
 
+     or, with a few more options
+
+       $cloudbiolinux/test/test_biolinux -p 2222 -u biolinux -i ~/.ssh/biolinux.pub localhost Minimal
+
   Available flavors are:
 
 USAGE
-  list_boxes
+  list_boxes config
   exit 0
 end
 
@@ -128,13 +133,15 @@ OptionParser.new do |o|
   o.parse!
 end
 
-$hostname = ARGV.shift
-$flavor = ARGV.shift
+if ARGV.size == 0
+  $hostname = 'biolinux'
+else
+  $hostname = ARGV.shift
+  $flavor = ARGV.shift
+end
 # default values
 $hostname = '127.0.0.1' if not $hostname
-$user = 'biolinux' if not $user
 $flavor = 'Minimal' if not $flavor
-$port = 22 if not $port
 
 print "Testing #{$flavor} (#{$user}@#{$hostname})\n"
 
@@ -151,29 +158,33 @@ fab_opts += " -i #{$sshkey}" if $sshkey
 fab_opts += " -H #{$hostname}"
 fab_opts += ":#{$port}" if $port
 
-run "fab #{fab_opts} -f #{srcpath}/fabfile.py -c #{fabricrc} install_biolinux:packagelist=#{packagelist},environment=biolinux-test"
+$stderr.print "Logging in with fab through ssh hostname <#{$hostname}>, port <#{$port}>, user <#{$user}>, passwd <#{$pwd}>\n"
 
-# Net::SSH.start($hostname, $user, :password => $pwd, :keys => [$sshkey], :port => $port) do |ssh|
-Net::SSH.start($hostname, $user, :password => $pwd, :port => $port) do |ssh|
+run "fab #{fab_opts} -f #{srcpath}/fabfile.py -c #{fabricrc} install_biolinux:flavor=#{packagelist}"
+
+ssh_opts = {}
+ssh_opts[:password] = $pwd if $pwd
+ssh_opts[:port] = $port if $port
+Net::SSH.start($hostname, $user, ssh_opts) do |ssh|
   @ssh = ssh
   @prompt = $hostname
   @prompt = "img" if $hostname == '127.0.0.1'
   def exec cmd
-    print "#{@prompt}> ",cmd,"\n"
+    $stderr.print "#{@prompt}> ",cmd,"\n"
     @ssh.exec!(cmd)
   end
-  print "logged in!\n"
+  $stderr.print "logged in!\n"
   dpkg = exec("dpkg -l")
   File.open("dpkg.lst","w").write(dpkg)
   test_for_match(ssh,"/usr/bin/ruby -v", "ruby")
-  # test_in_path(ssh,"gem")
+  test_in_path(ssh,"gem")
 
   # test for completed install
-  lastline = ssh.exec!("tail -1 /var/log/biolinux.log")
-  print lastline
+  # lastline = ssh.exec!("tail -1 /var/log/biolinux.log")
+  # print lastline
   log = ssh.exec!("cat /var/log/biolinux.log")
   File.open("biolinux.log","w").write(log)
-  if lastline =~ /#{$flavor}/
+  # if lastline =~ /#{$flavor}/
     print <<COMPLETE
 
   SUCCESS!
@@ -184,7 +195,7 @@ Net::SSH.start($hostname, $user, :password => $pwd, :port => $port) do |ssh|
   Enjoy!
 COMPLETE
     exit 0
-  end
+  # end
   print <<INCOMPLETE
 
   FAILURE!

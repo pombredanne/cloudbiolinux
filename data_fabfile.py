@@ -25,8 +25,7 @@ for to_remove in [p for p in sys.path if p.find("cloudbiolinux-") > 0]:
     sys.path.remove(to_remove)
 sys.path.append(os.path.dirname(__file__))
 
-from cloudbio.distribution import _setup_distribution_environment
-from cloudbio.utils import _setup_logging
+from cloudbio.utils import _setup_logging, _configure_fabric_environment
 from cloudbio.biodata import genomes
 
 # -- Host specific setup
@@ -38,7 +37,7 @@ def setup_environment():
     """
     _setup_logging(env)
     _add_defaults()
-    _setup_distribution_environment()
+    _configure_fabric_environment(env, ignore_distcheck=True)
 
 def _add_defaults():
     """Defaults from fabricrc.txt file; loaded if not specified at commandline.
@@ -60,11 +59,32 @@ def install_data(config_source=CONFIG_FILE):
     setup_environment()
     genomes.install_data(config_source)
 
+def install_data_raw(config_source=CONFIG_FILE):
+    """Installing useful biological data building from scratch. Useful for debugging.
+    """
+    setup_environment()
+    genomes.install_data(config_source, approaches=["raw"])
+
 def install_data_s3(config_source=CONFIG_FILE, do_setup_environment=True):
     """Install data using pre-existing genomes present on Amazon s3.
     """
     setup_environment()
     genomes.install_data_s3(config_source)
+
+def install_data_rsync(config_source=CONFIG_FILE):
+    """Install data using Galaxy rsync data servers.
+    """
+    setup_environment()
+    genomes.install_data_rsync(config_source)
+
+def install_data_ggd(recipe, organism):
+    """Install data using Get Genomics Data (GGD) recipes.
+    """
+    setup_environment()
+    from cloudbio.biodata import ggd, genomes
+    genome_dir = os.path.join(genomes._make_genome_dir(), organism)
+    recipe_file = os.path.join(os.path.dirname(__file__), "ggd-recipes", organism, "%s.yaml" % recipe)
+    ggd.install_recipe(genome_dir, recipe_file, organism)
 
 def upload_s3(config_source=CONFIG_FILE):
     """Upload prepared genome files by identifier to Amazon s3 buckets.

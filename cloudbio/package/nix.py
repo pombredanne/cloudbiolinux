@@ -4,6 +4,7 @@ from fabric.api import *
 from fabric.contrib.files import *
 
 from cloudbio.package.shared import _yaml_to_packages
+from cloudbio.flavor.config import get_config_file
 
 def _setup_nix_sources():
     if env.nixpkgs:
@@ -41,11 +42,10 @@ def _nix_packages(to_install):
     """
     if env.nixpkgs:
         env.logger.info("Update and install NixPkgs packages")
-        pkg_config_file = os.path.join(env.config_dir, "packages-nix.yaml")
+        pkg_config_file = get_config_file(env, "packages-nix.yaml").base
         sudo("nix-channel --update")
         # Retrieve final package names
         (packages, _) = _yaml_to_packages(pkg_config_file, to_install)
-        packages = env.edition.rewrite_config_items("packages", packages)
         packages = env.flavor.rewrite_config_items("packages", packages)
         for p in packages:
             sudo("nix-env -b -i %s" % p)

@@ -15,8 +15,7 @@ import os
 import operator
 import socket
 import subprocess
-from contextlib import contextmanager
-from xml.etree import ElementTree
+from math import log
 
 from fabric.api import *
 from fabric.contrib.files import *
@@ -30,8 +29,9 @@ try:
 except ImportError:
     boto = None
 
-from cloudbio.biodata.dbsnp import download_dbsnp
-from cloudbio.biodata.rnaseq import download_transcripts
+from cloudbio.biodata import galaxy, ggd, rnaseq
+from cloudbio.custom import shared
+from cloudbio.fabutils import quiet
 
 # -- Configuration for genomes to download and prepare
 
@@ -45,58 +45,106 @@ class _DownloadHelper:
     def _exists(self, fname, seq_dir):
         """Check if a file exists in either download or final destination.
         """
-        return exists(fname) or exists(os.path.join(seq_dir, fname))
+        return env.safe_exists(fname) or env.safe_exists(os.path.join(seq_dir, fname))
 
 class UCSCGenome(_DownloadHelper):
-    def __init__(self, genome_name):
+    def __init__(self, genome_name, dl_name=None):
         _DownloadHelper.__init__(self)
         self.data_source = "UCSC"
         self._name = genome_name
+        self.dl_name = dl_name if dl_name is not None else genome_name
         self._url = "ftp://hgdownload.cse.ucsc.edu/goldenPath/%s/bigZips" % \
                 genome_name
 
     def ucsc_name(self):
         return self._name
 
+    def _karyotype_sort(self, xs):
+        """Sort reads in karyotypic order to work with GATK's defaults.
+        """
+        def karyotype_keyfn(x):
+            base = os.path.splitext(os.path.basename(x))[0]
+            if base.startswith("chr"):
+                base = base[3:]
+            parts = base.split("_")
+            try:
+                parts[0] = int(parts[0])
+            except ValueError:
+                pass
+            # unplaced at the very end
+            if parts[0] == "Un":
+                parts.insert(0, "z")
+            # mitochondrial special case -- after X/Y
+            elif parts[0] in ["M", "MT"]:
+                parts.insert(0, "x")
+            # sort random and extra chromosomes after M
+            elif len(parts) > 1:
+                parts.insert(0, "y")
+            return parts
+        return sorted(xs, key=karyotype_keyfn)
+
+    def _split_multifasta(self, fasta_file):
+        chrom = ""
+        file_handle = None
+        file_names = []
+        out_dir = os.path.dirname(fasta_file)
+        with open(fasta_file) as in_handle:
+            for line in in_handle:
+                if line.startswith(">"):
+                    chrom = line.split(">")[1].strip()
+                    file_handle.close() if file_handle else None
+                    file_names.append(chrom + ".fa")
+                    file_handle = open(os.path.join(out_dir, chrom + ".fa"), "w")
+                    file_handle.write(line)
+                else:
+                    file_handle.write(line)
+        file_handle.close()
+        return file_names
+
     def download(self, seq_dir):
         zipped_file = None
         genome_file = "%s.fa" % self._name
         if not self._exists(genome_file, seq_dir):
-            zipped_file = self._download_zip(seq_dir)
-            if zipped_file.endswith(".tar.gz"):
-                run("tar -xzpf %s" % zipped_file)
-            elif zipped_file.endswith(".zip"):
-                run("unzip %s" % zipped_file)
-            elif zipped_file.endswith(".gz"):
-                run("gunzip -c %s > out.fa" % zipped_file)
-            else:
-                raise ValueError("Do not know how to handle: %s" % zipped_file)
-            tmp_file = genome_file.replace(".fa", ".txt")
-            with settings(warn_only=True):
-                result = run("ls *.fa")
-            # some UCSC downloads have the files in multiple directories
-            # mv them to the parent directory and delete the child directories
-            #ignore_random = " -a \! -name '*_random.fa' -a \! -name 'chrUn*'" \
-            #        "-a \! -name '*hap*.fa'"
-            ignore_random = ""
-            if result.failed:
-                run("find . -name '*.fa'%s -exec mv {} . \;" % ignore_random)
-                run("find . -type d -a \! -name '\.' | xargs rm -rf")
-            result = run("find . -name '*.fa'%s" % ignore_random)
-            result = [x.strip() for x in result.split("\n")]
-            result.sort()
-            run("cat %s > %s" % (" ".join(result), tmp_file))
-            run("rm -f *.fa")
-            run("mv %s %s" % (tmp_file, genome_file))
+            prep_dir = "seq_prep"
+            env.safe_run("mkdir -p %s" % prep_dir)
+            with cd(prep_dir):
+                zipped_file = self._download_zip(seq_dir)
+                if zipped_file.endswith(".tar.gz"):
+                    env.safe_run("tar -xzpf %s" % zipped_file)
+                elif zipped_file.endswith(".zip"):
+                    env.safe_run("unzip %s" % zipped_file)
+                elif zipped_file.endswith(".gz"):
+                    if not env.safe_exists("out.fa"):
+                        env.safe_run("gunzip -c %s > out.fa" % zipped_file)
+                else:
+                    raise ValueError("Do not know how to handle: %s" % zipped_file)
+                tmp_file = genome_file.replace(".fa", ".txt")
+                result = env.safe_run_output("find `pwd` -name '*.fa'")
+                result = [x.strip() for x in result.split("\n")]
+                if len(result) == 1:
+                    orig_result = result[0]
+                    result = self._split_multifasta(result[0])
+                    env.safe_run("rm %s" % orig_result)
+                result = self._karyotype_sort(result)
+                env.safe_run("rm -f inputs.txt")
+                for fname in result:
+                    with quiet():
+                        env.safe_run("echo '%s' >> inputs.txt" % fname)
+                env.safe_run("cat `cat inputs.txt` > %s" % (tmp_file))
+                for fname in result:
+                    with quiet():
+                        env.safe_run("rm -f %s" % fname)
+                env.safe_run("mv %s %s" % (tmp_file, genome_file))
+                zipped_file = os.path.join(prep_dir, zipped_file)
+                genome_file = os.path.join(prep_dir, genome_file)
         return genome_file, [zipped_file]
 
     def _download_zip(self, seq_dir):
         for zipped_file in ["chromFa.tar.gz", "%s.fa.gz" % self._name,
                             "chromFa.zip"]:
             if not self._exists(zipped_file, seq_dir):
-                with settings(warn_only=True):
-                    result = run("wget %s/%s" % (self._url, zipped_file))
-                if not result.failed:
+                result = shared._remote_fetch(env, "%s/%s" % (self._url, zipped_file), allow_fail=True)
+                if result:
                     break
             else:
                 break
@@ -105,63 +153,87 @@ class UCSCGenome(_DownloadHelper):
 class NCBIRest(_DownloadHelper):
     """Retrieve files using the TogoWS REST server pointed at NCBI.
     """
-    def __init__(self, name, refs):
+    def __init__(self, name, refs, dl_name=None):
         _DownloadHelper.__init__(self)
         self.data_source = "NCBI"
         self._name = name
         self._refs = refs
+        self.dl_name = dl_name if dl_name is not None else name
         self._base_url = "http://togows.dbcls.jp/entry/ncbi-nucleotide/%s.fasta"
 
     def download(self, seq_dir):
         genome_file = "%s.fa" % self._name
         if not self._exists(genome_file, seq_dir):
             for ref in self._refs:
-                run("wget %s" % (self._base_url % ref))
-                run("ls -l")
-                run("sed -rie .bak '/1/ s/^>.*$/>%s/g' %s.fasta" % (ref,
-                    ref))
-                # sed in Fabric does not cd properly?
-                #sed('%s.fasta' % ref, '^>.*$', '>%s' % ref, '1')
+                shared._remote_fetch(env, self._base_url % ref)
+                env.safe_run("ls -l")
+                env.safe_sed('%s.fasta' % ref, '^>.*$', '>%s' % ref, '1')
             tmp_file = genome_file.replace(".fa", ".txt")
-            run("cat *.fasta > %s" % tmp_file)
-            run("rm -f *.fasta")
-            run("rm -f *.bak")
-            run("mv %s %s" % (tmp_file, genome_file))
+            env.safe_run("cat *.fasta > %s" % tmp_file)
+            env.safe_run("rm -f *.fasta")
+            env.safe_run("rm -f *.bak")
+            env.safe_run("mv %s %s" % (tmp_file, genome_file))
+        return genome_file, []
+
+class VectorBase(_DownloadHelper):
+    """Retrieve genomes from VectorBase) """
+
+    def __init__(self, name, genus, species, strain, release, assembly_types):
+        _DownloadHelper.__init__(self)
+        self._name = name
+        self.data_source = "VectorBase"
+        self._base_url = ("http://www.vectorbase.org/sites/default/files/ftp/"
+                          "downloads/")
+        _base_file = ("{genus}-{species}-{strain}_{assembly}"
+                      "_{release}.fa.gz")
+        self._to_get = []
+        for assembly in assembly_types:
+            self._to_get.append(_base_file.format(**locals()))
+
+    def download(self, seq_dir):
+        genome_file = "%s.fa" % self._name
+        for fn in self._to_get:
+            url = self._base_url + fn
+            if not self._exists(fn, seq_dir):
+                shared._remote_fetch(env, url)
+                env.safe_run("gunzip -c %s >> %s" % (fn, genome_file))
         return genome_file, []
 
 class EnsemblGenome(_DownloadHelper):
     """Retrieve genome FASTA files from Ensembl.
-
-    ftp://ftp.ensemblgenomes.org/pub/plants/release-3/fasta/
-    arabidopsis_thaliana/dna/Arabidopsis_thaliana.TAIR9.55.dna.toplevel.fa.gz
-    ftp://ftp.ensembl.org/pub/release-56/fasta/
-    caenorhabditis_elegans/dna/Caenorhabditis_elegans.WS200.56.dna.toplevel.fa.gz
+    ftp://ftp.ensemblgenomes.org/pub/plants/release-22/fasta/
+    arabidopsis_thaliana/dna/Arabidopsis_thaliana.TAIR10.22.dna.toplevel.fa.gz
+    ftp://ftp.ensembl.org/pub/release-75/fasta/
+    caenorhabditis_elegans/dna/Caenorhabditis_elegans.WBcel235.75.dna.toplevel.fa.gz
+    ftp://ftp.ensemblgenomes.org/pub/bacteria/release-23/bacteria/fasta/
+    bacteria_17_collection/pseudomonas_aeruginosa_ucbpp_pa14/dna/
+    Pseudomonas_aeruginosa_ucbpp_pa14.GCA_000014625.1.23.dna.toplevel.fa.gz
     """
-    def __init__(self, ensembl_section, release_number, release2, organism,
-            name, convert_to_ucsc=False):
+    def __init__(self, ensembl_section, release, organism, name, subsection=None):
         _DownloadHelper.__init__(self)
         self.data_source = "Ensembl"
         if ensembl_section == "standard":
             url = "ftp://ftp.ensembl.org/pub/"
         else:
             url = "ftp://ftp.ensemblgenomes.org/pub/%s/" % ensembl_section
-        url += "release-%s/fasta/%s/dna/" % (release_number, organism.lower())
+        url += "release-%s/fasta/" % release
+        if subsection:
+            url += "%s/" % subsection
+        url += "%s/dna/" % organism.lower()
         self._url = url
-        release2 = ".%s" % release2 if release2 else ""
-        self._get_file = "%s.%s%s.dna.toplevel.fa.gz" % (organism, name,
-                release2)
+        if ensembl_section == "standard":
+            self._get_file = "%s.%s.dna.toplevel.fa.gz" % (organism, name)
+        else:
+            self._get_file = "%s.%s.%s.dna.toplevel.fa.gz" % (organism, name, release)
         self._name = name
-        self._convert_to_ucsc = convert_to_ucsc
+        self.dl_name = name
 
     def download(self, seq_dir):
         genome_file = "%s.fa" % self._name
         if not self._exists(self._get_file, seq_dir):
-            run("wget %s%s" % (self._url, self._get_file))
+            shared._remote_fetch(env, "%s%s" % (self._url, self._get_file))
         if not self._exists(genome_file, seq_dir):
-            run("gunzip -c %s > %s" % (self._get_file, genome_file))
-        if self._convert_to_ucsc:
-            #run("sed s/ / /g %s" % genome_file)
-            raise NotImplementedError("Replace with chr")
+            env.safe_run("gunzip -c %s > %s" % (self._get_file, genome_file))
         return genome_file, [self._get_file]
 
 class BroadGenome(_DownloadHelper):
@@ -169,60 +241,74 @@ class BroadGenome(_DownloadHelper):
 
     Uses the UCSC-name compatible versions of the GATK bundles.
     """
-    def __init__(self, name, bundle_version, target_fasta, dl_name=None):
+    def __init__(self, name, target_fasta, dl_name=None):
         _DownloadHelper.__init__(self)
         self.data_source = "UCSC"
         self._name = name
         self.dl_name = dl_name if dl_name is not None else name
         self._target = target_fasta
         self._ftp_url = "ftp://gsapubftp-anonymous:@ftp.broadinstitute.org/bundle/" + \
-                        "{ver}/{org}/".format(ver=bundle_version, org=self.dl_name)
+                        "{org}/".format(org=self.dl_name)
 
     def download(self, seq_dir):
         org_file = "%s.fa" % self._name
         if not self._exists(org_file, seq_dir):
-            run("wget %s%s.gz" % (self._ftp_url, self._target))
-            run("gunzip %s.gz" % self._target)
-            run("mv %s %s" % (self._target, org_file))
+            shared._remote_fetch(env, "%s%s.gz" % (self._ftp_url, self._target))
+            env.safe_run("gunzip %s.gz" % self._target)
+            env.safe_run("mv %s %s" % (self._target, org_file))
         return org_file, []
 
-BROAD_BUNDLE_VERSION = "1.5"
-DBSNP_VERSION = "135"
+class GGDGenome:
+    """Genome with download specified via a GGD recipe.
+    """
+    def __init__(self, name):
+        self._name = name
 
 GENOMES_SUPPORTED = [
            ("phiX174", "phix", NCBIRest("phix", ["NC_001422.1"])),
-           ("Scerevisiae", "sacCer2", UCSCGenome("sacCer2")),
+           ("Scerevisiae", "sacCer3", UCSCGenome("sacCer3")),
+           ("Mmusculus", "mm10", UCSCGenome("mm10")),
            ("Mmusculus", "mm9", UCSCGenome("mm9")),
            ("Mmusculus", "mm8", UCSCGenome("mm8")),
-           ("Hsapiens", "hg18", BroadGenome("hg18", BROAD_BUNDLE_VERSION,
-                                            "Homo_sapiens_assembly18.fasta")),
-           ("Hsapiens", "hg19", BroadGenome("hg19", BROAD_BUNDLE_VERSION,
-                                            "ucsc.hg19.fasta")),
-           ("Hsapiens", "GRCh37", BroadGenome("GRCh37", BROAD_BUNDLE_VERSION,
-                                              "human_g1k_v37.fasta", "b37")),
+           ("Hsapiens", "hg18", BroadGenome("hg18", "Homo_sapiens_assembly18.fasta")),
+           ("Hsapiens", "hg19", BroadGenome("hg19", "ucsc.hg19.fasta")),
+           ("Hsapiens", "GRCh37", BroadGenome("GRCh37", "human_g1k_v37.fasta", "b37")),
+           ("Hsapiens", "hg38", GGDGenome("hg38")),
+           ("Hsapiens", "hg38-noalt", GGDGenome("hg38-noalt")),
+           ("Rnorvegicus", "rn6", GGDGenome("rn6")),
+           ("Rnorvegicus", "rn5", UCSCGenome("rn5")),
            ("Rnorvegicus", "rn4", UCSCGenome("rn4")),
-           ("Xtropicalis", "xenTro2", UCSCGenome("xenTro2")),
-           ("Athaliana", "araTha_tair9", EnsemblGenome("plants", "6", "",
-               "Arabidopsis_thaliana", "TAIR9")),
+           ("Xtropicalis", "xenTro3", UCSCGenome("xenTro3")),
+           ("Athaliana", "TAIR10", EnsemblGenome("plants", "26",
+                                                 "Arabidopsis_thaliana", "TAIR10")),
            ("Dmelanogaster", "dm3", UCSCGenome("dm3")),
-           ("Celegans", "WS210", EnsemblGenome("standard", "60", "60",
-               "Caenorhabditis_elegans", "WS210")),
+           ("Celegans", "WBcel235", EnsemblGenome("standard", "80",
+                                                  "Caenorhabditis_elegans", "WBcel235")),
            ("Mtuberculosis_H37Rv", "mycoTube_H37RV", NCBIRest("mycoTube_H37RV",
                ["NC_000962"])),
            ("Msmegmatis", "92", NCBIRest("92", ["NC_008596.1"])),
-           ("Paeruginosa_UCBPP-PA14", "386", NCBIRest("386", ["CP000438.1"])),
+           ("Paeruginosa_UCBPP-PA14", "pseudomonas_aeruginosa_ucbpp_pa14",
+            EnsemblGenome("bacteria", "26", "Pseudomonas_aeruginosa_ucbpp_pa14",
+                          "GCA_000014625.1", "bacteria_17_collection")),
            ("Ecoli", "eschColi_K12", NCBIRest("eschColi_K12", ["U00096.2"])),
            ("Amellifera_Honeybee", "apiMel3", UCSCGenome("apiMel3")),
+           ("Cfamiliaris_Dog", "canFam3", UCSCGenome("canFam3")),
            ("Cfamiliaris_Dog", "canFam2", UCSCGenome("canFam2")),
-           ("Drerio_Zebrafish", "danRer6", UCSCGenome("danRer6")),
+           ("Drerio_Zebrafish", "Zv9", EnsemblGenome("standard", "80", "Danio_rerio", "Zv9")),
+           ("Drerio_Zebrafish", "GRCz10", EnsemblGenome("standard", "81", "Danio_rerio", "GRCz10")),
            ("Ecaballus_Horse", "equCab2", UCSCGenome("equCab2")),
            ("Fcatus_Cat", "felCat3", UCSCGenome("felCat3")),
-           ("Ggallus_Chicken", "galGal3", UCSCGenome("galGal3")),
+           ("Ggallus_Chicken", "galGal4", UCSCGenome("galGal4")),
            ("Tguttata_Zebra_finch", "taeGut1", UCSCGenome("taeGut1")),
-          ]
-
-GENOME_INDEXES_SUPPORTED = ["bowtie", "bowtie2", "bwa", "maq", "novoalign", "novoalign-cs",
-                            "ucsc", "mosaik", "eland", "bfast", "arachne"]
+           ("Aalbimanus", "AalbS1", VectorBase("AalbS1", "Anopheles",
+                                               "albimanus", "STECLA",
+                                               "AalbS1", ["SCAFFOLDS"])),
+           ("Agambiae", "AgamP3", VectorBase("AgamP3", "Anopheles",
+                                               "gambiae", "PEST",
+                                               "AgamP3", ["CHROMOSOMES"])),]
+GENOME_INDEXES_SUPPORTED = ["bowtie", "bowtie2", "bwa", "maq", "novoalign",
+                            "novoalign-cs", "ucsc", "mosaik", "snap", "star",
+                            "rtg", "hisat2"]
 DEFAULT_GENOME_INDEXES = ["seq"]
 
 # -- Fabric instructions
@@ -232,15 +318,25 @@ def _check_version():
     if int(version.split(".")[0]) < 1:
         raise NotImplementedError("Please install fabric version 1 or better")
 
-def install_data(config_source):
+def install_data(config_source, approaches=None):
     """Main entry point for installing useful biological data.
     """
+    PREP_FNS = {"s3": _download_s3_index,
+                "ggd": _install_with_ggd,
+                "raw": _prep_raw_index}
+    if approaches is None: approaches = ["ggd", "s3", "raw"]
+    ready_approaches = []
+    for approach in approaches:
+        ready_approaches.append((approach, PREP_FNS[approach]))
     _check_version()
     # Append a potentially custom system install path to PATH so tools are found
     with path(os.path.join(env.system_install, 'bin')):
         genomes, genome_indexes, config = _get_genomes(config_source)
-        genome_indexes += DEFAULT_GENOME_INDEXES
-        _data_ngs_genomes(genomes, genome_indexes)
+        genome_indexes = [x for x in DEFAULT_GENOME_INDEXES if x not in genome_indexes] + genome_indexes
+        _make_genome_directories(env, genomes)
+        rnaseq.cleanup(genomes, env)
+        _prep_genomes(env, genomes, genome_indexes, ready_approaches)
+        rnaseq.finalize(genomes, env)
         _install_additional_data(genomes, genome_indexes, config)
 
 def install_data_s3(config_source):
@@ -248,9 +344,24 @@ def install_data_s3(config_source):
     """
     _check_version()
     genomes, genome_indexes, config = _get_genomes(config_source)
-    genome_indexes += DEFAULT_GENOME_INDEXES
+    genome_indexes += [x for x in DEFAULT_GENOME_INDEXES if x not in genome_indexes]
+    _make_genome_directories(env, genomes)
+    rnaseq.cleanup(genomes, env)
     _download_genomes(genomes, genome_indexes)
+    rnaseq.finalize(genomes, env)
     _install_additional_data(genomes, genome_indexes, config)
+
+def install_data_rsync(config_source):
+    """Install data using pre-existing genomes from Galaxy rsync servers.
+    """
+    _check_version()
+    genomes, genome_indexes, config = _get_genomes(config_source)
+    genome_indexes += [x for x in DEFAULT_GENOME_INDEXES if x not in genome_indexes]
+    # Galaxy stores FASTAs in ucsc format and generates on the fly
+    if "ucsc" not in genome_indexes:
+        genome_indexes.append("ucsc")
+    genome_dir = _make_genome_dir()
+    galaxy.rsync_genomes(genome_dir, genomes, genome_indexes)
 
 def upload_s3(config_source):
     """Upload prepared genome files by identifier to Amazon s3 buckets.
@@ -261,14 +372,13 @@ def upload_s3(config_source):
         raise ValueError("Need to run S3 upload on a local machine")
     _check_version()
     genomes, genome_indexes, config = _get_genomes(config_source)
-    genome_indexes += DEFAULT_GENOME_INDEXES
+    genome_indexes += [x for x in DEFAULT_GENOME_INDEXES if x not in genome_indexes]
     _data_ngs_genomes(genomes, genome_indexes)
     _upload_genomes(genomes, genome_indexes)
 
+
 def _install_additional_data(genomes, genome_indexes, config):
-    download_dbsnp(genomes, BROAD_BUNDLE_VERSION, DBSNP_VERSION)
-    download_transcripts(genomes, env)
-    for custom in config.get("custom", []):
+    for custom in (config.get("custom") or []):
         _prep_custom_genome(custom, genomes, genome_indexes, env)
     if config.get("install_liftover", False):
         lift_over_genomes = [g.ucsc_name() for (_, _, g) in genomes if g.ucsc_name()]
@@ -286,8 +396,8 @@ def _get_genomes(config_source):
             config = yaml.load(in_handle)
     genomes = []
     genomes_config = config["genomes"] or []
-    env.logger.info("List of genomes to get (from the config file at '{0}'): {1}"\
-        .format(config_source, ', '.join(g['name'] for g in genomes_config)))
+    env.logger.info("List of genomes to get (from the config file at '{0}'): {1}"
+                    .format(config_source, ', '.join(g.get('name', g["dbkey"]) for g in genomes_config)))
     for g in genomes_config:
         ginfo = None
         for info in GENOMES_SUPPORTED:
@@ -299,43 +409,98 @@ def _get_genomes(config_source):
         manager.config = g
         genomes.append((name, gid, manager))
     indexes = config["genome_indexes"] or []
+    if "seq" in indexes:
+        indexes.remove("seq")
+        indexes.insert(0, "seq")
     return genomes, indexes, config
 
-# == Decorators and context managers
+# ## Decorators and context managers
 
 def _if_installed(pname):
     """Run if the given program name is installed.
     """
     def argcatcher(func):
         def decorator(*args, **kwargs):
-            with settings(
-                    hide('warnings', 'running', 'stdout', 'stderr'),
-                    warn_only=True):
-                result = run(pname)
-            if result.return_code not in [127]:
+            if not shared._executable_not_on_path(pname):
                 return func(*args, **kwargs)
         return decorator
     return argcatcher
 
-@contextmanager
-def _make_tmp_dir():
-    work_dir = os.path.join(env.data_files, "tmp")
-    if not exists(work_dir):
-        run("mkdir %s" % work_dir)
-    yield work_dir
-    if exists(work_dir):
-        run("rm -rf %s" % work_dir)
-
-# ## Genomes index for next-gen sequencing tools
+# ## Generic preparation functions
 
 def _make_genome_dir():
     genome_dir = os.path.join(env.data_files, "genomes")
-    with settings(warn_only=True):
-        result = run("mkdir -p %s" % genome_dir)
-    if result.failed:
-        sudo("mkdir -p %s" % genome_dir)
-        sudo("chown -R %s %s" % (env.user, genome_dir))
+    if not env.safe_exists(genome_dir):
+        with settings(warn_only=True):
+            result = env.safe_run_output("mkdir -p %s" % genome_dir)
+    else:
+        result = None
+    if result is not None and result.failed:
+        env.safe_sudo("mkdir -p %s" % genome_dir)
+        env.safe_sudo("chown -R %s %s" % (env.user, genome_dir))
     return genome_dir
+
+
+def _make_genome_directories(env, genomes):
+    genome_dir = _make_genome_dir()
+    for (orgname, gid, manager) in genomes:
+        org_dir = os.path.join(genome_dir, orgname, gid)
+        if not env.safe_exists(org_dir):
+            env.safe_run('mkdir -p %s' % org_dir)
+
+def _prep_genomes(env, genomes, genome_indexes, retrieve_fns):
+    """Prepare genomes with the given indexes, supporting multiple retrieval methods.
+    """
+    genome_dir = _make_genome_dir()
+    for (orgname, gid, manager) in genomes:
+        org_dir = os.path.join(genome_dir, orgname, gid)
+        if not env.safe_exists(org_dir):
+            env.safe_run('mkdir -p %s' % org_dir)
+        ggd_recipes = manager.config.get("annotations", []) + manager.config.get("validation", [])
+        ggd_recipes += [x for x in manager.config.get("indexes", []) if x in genome_indexes]
+        for idx in genome_indexes + ggd_recipes:
+            with cd(org_dir):
+                if idx in ggd_recipes or not env.safe_exists(idx):
+                    finished = False
+                    for method, retrieve_fn in retrieve_fns:
+                        try:
+                            retrieve_fn(env, manager, gid, idx)
+                            finished = True
+                            break
+                        except KeyboardInterrupt:
+                            raise
+                        except:
+                            # Fail on incorrect GGD recipes
+                            if idx in ggd_recipes and method == "ggd":
+                                raise
+                            else:
+                                env.logger.info("Genome preparation method {0} failed, trying next".format(method))
+                    if not finished:
+                        raise IOError("Could not prepare index {0} for {1} by any method".format(idx, gid))
+        ref_file = os.path.join(org_dir, "seq", "%s.fa" % gid)
+        if not env.safe_exists(ref_file):
+            ref_file = os.path.join(org_dir, "seq", "%s.fa" % manager._name)
+        assert env.safe_exists(ref_file), ref_file
+        _index_to_galaxy(org_dir, ref_file, gid, genome_indexes, manager.config)
+
+# ## Genomes index for next-gen sequencing tools
+
+def _get_ref_seq(env, manager):
+    """Check for or retrieve the reference sequence.
+    """
+    seq_dir = os.path.join(env.cwd, "seq")
+    ref_file = os.path.join(seq_dir, "%s.fa" % manager._name)
+    if not env.safe_exists(ref_file):
+        ref_file, base_zips = manager.download(seq_dir)
+        ref_file = _move_seq_files(ref_file, base_zips, seq_dir)
+    return ref_file
+
+def _prep_raw_index(env, manager, gid, idx):
+    """Prepare genome from raw downloads and indexes.
+    """
+    env.logger.info("Preparing genome {0} with index {1}".format(gid, idx))
+    ref_file = _get_ref_seq(env, manager)
+    get_index_fn(idx)(ref_file)
 
 def _data_ngs_genomes(genomes, genome_indexes):
     """Download and create index files for next generation genomes.
@@ -343,12 +508,11 @@ def _data_ngs_genomes(genomes, genome_indexes):
     genome_dir = _make_genome_dir()
     for organism, genome, manager in genomes:
         cur_dir = os.path.join(genome_dir, organism, genome)
-        env.logger.info("Processing genome {0} and putting it to {1}"\
-            .format(organism, cur_dir))
-        if not exists(cur_dir):
-            run('mkdir -p %s' % cur_dir)
+        env.logger.info("Processing genome {0} and putting it to {1}".format(organism, cur_dir))
+        if not env.safe_exists(cur_dir):
+            env.safe_run('mkdir -p %s' % cur_dir)
         with cd(cur_dir):
-            if env.remove_old_genomes:
+            if hasattr(env, "remove_old_genomes") and env.remove_old_genomes:
                 _clean_genome_directory()
             seq_dir = 'seq'
             ref_file, base_zips = manager.download(seq_dir)
@@ -359,35 +523,13 @@ def _data_ngs_genomes(genomes, genome_indexes):
 def _index_to_galaxy(work_dir, ref_file, gid, genome_indexes, config):
     """Index sequence files and update associated Galaxy loc files.
     """
-    INDEX_FNS = {
-        "seq" : _index_sam,
-        "bwa" : _index_bwa,
-        "bowtie": _index_bowtie,
-        "bowtie2": _index_bowtie2,
-        "maq": _index_maq,
-        "mosaik": _index_mosaik,
-        "novoalign": _index_novoalign,
-        "novoalign_cs": _index_novoalign_cs,
-        "ucsc": _index_twobit,
-        "eland": _index_eland,
-        "bfast": _index_bfast,
-        "arachne": _index_arachne
-        }
     indexes = {}
     with cd(work_dir):
         for idx in genome_indexes:
-            indexes[idx] = INDEX_FNS[idx](ref_file)
-    for ref_index_file, cur_index, prefix, new_style, tool_name in [
-          ("sam_fa_indices.loc", indexes.get("seq", None), "index", False, 'sam'),
-          ("alignseq.loc", indexes.get("ucsc", None), "seq", False, 'alignseq'),
-          ("twobit.loc", indexes.get("ucsc", None), "", False, 'twobit'),
-          ("bowtie_indices.loc", indexes.get("bowtie", None), "", True, 'bowtie'),
-          ("mosaik_index.loc", indexes.get("mosaik", None), "", True, "mosaik"),
-          ("bwa_index.loc", indexes.get("bwa", None), "", True, 'bwa')]:
-        if cur_index:
-            str_parts = _build_galaxy_loc_line(gid, os.path.join(work_dir, cur_index),
-                                               config, prefix, new_style, tool_name)
-            _update_loc_file(ref_index_file, str_parts)
+            index_file = get_index_fn(idx)(ref_file)
+            if index_file:
+                indexes[idx] = os.path.join(work_dir, index_file)
+    galaxy.prep_locs(gid, indexes, config)
 
 class CustomMaskManager:
     """Create a custom genome based on masking an existing genome.
@@ -396,22 +538,22 @@ class CustomMaskManager:
         assert custom.has_key("mask")
         self._custom = custom
         self.config = config
- 
+
     def download(self, seq_dir):
         base_seq = os.path.join(os.pardir, self._custom["base"],
                                 "seq", "{0}.fa".format(self._custom["base"]))
-        assert exists(base_seq)
+        assert env.safe_exists(base_seq)
         mask_file = os.path.basename(self._custom["mask"])
         ready_mask = apply("{0}-complement{1}".format, os.path.splitext(mask_file))
         out_fasta = "{0}.fa".format(self._custom["dbkey"])
-        if not exists(os.path.join(seq_dir, out_fasta)):
-            if not exists(mask_file):
-                run("wget {0}".format(self._custom["mask"]))
-            if not exists(ready_mask):
-                run("bedtools complement -i {i} -g {g}.fai > {o}".format(
+        if not env.safe_exists(os.path.join(seq_dir, out_fasta)):
+            if not env.safe_exists(mask_file):
+                shared._remote_fetch(env, self._custom["mask"])
+            if not env.safe_exists(ready_mask):
+                env.safe_run("bedtools complement -i {i} -g {g}.fai > {o}".format(
                     i=mask_file, g=base_seq, o=ready_mask))
-            if not exists(out_fasta):
-                run("bedtools maskfasta -fi {fi} -bed {bed} -fo {fo}".format(
+            if not env.safe_exists(out_fasta):
+                env.safe_run("bedtools maskfasta -fi {fi} -bed {bed} -fo {fo}".format(
                     fi=base_seq, bed=ready_mask, fo=out_fasta))
         return out_fasta, [mask_file, ready_mask]
 
@@ -431,123 +573,42 @@ def _prep_custom_genome(custom, genomes, genome_indexes, env):
                         CustomMaskManager(custom, cur_manager.config)]],
                       genome_indexes)
 
-class LocCols(object):
-    # Hold all possible .loc file column fields making sure the local
-    # variable names match column names in Galaxy's tool_data_table_conf.xml
-    def __init__(self, config, dbkey, file_path):
-        self.dbkey = dbkey
-        self.path = file_path
-        self.value = config.get("value", dbkey)
-        self.name = config.get("name", dbkey)
-        self.species = config.get('species', '')
-        self.index = config.get('index', 'index')
-        self.formats = config.get('index', 'fastqsanger')
-        self.dbkey1 = config.get('index', dbkey)
-        self.dbkey2 = config.get('index', dbkey)
-
-def _build_galaxy_loc_line(dbkey, file_path, config, prefix, new_style, tool_name):
-    """Prepare genome information to write to a Galaxy *.loc config file.
-    """
-    if new_style:
-        str_parts = []
-        tool_conf = _get_tool_conf(tool_name)
-        loc_cols = LocCols(config, dbkey, file_path)
-        # Compose the .loc file line as str_parts list by looking for column values
-        # from the retrieved tool_conf (as defined in tool_data_table_conf.xml). 
-        # Any column values required but missing in the the tool_conf are 
-        # supplemented by the defaults defined in LocCols class
-        for col in tool_conf.get('columns', []):
-            str_parts.append(config.get(col, getattr(loc_cols, col)))
-        # print "manufact str_parts: %s" % str_parts
-        # str_parts = [loc_cols.value, dbkey, loc_cols.name, file_path]
-        # print "original str_parts: %s" % str_parts
-    else:
-        str_parts = [dbkey, file_path]
-    if prefix:
-        str_parts.insert(0, prefix)
-    return str_parts
-
-def _get_tool_conf(tool_name):
-    """
-    Parse the tool_data_table_conf.xml from installed_files subfolder and extract
-    values for the 'columns' tag and 'path' parameter for the 'file' tag, returning 
-    those as a dict.
-    """
-    tool_conf = {}
-    tdtc = ElementTree.parse(env.tool_data_table_conf_file)
-    tables = tdtc.getiterator('table')
-    for t in tables:
-        if tool_name in t.attrib.get('name', ''):
-            tool_conf['columns'] = t.find('columns').text.replace(' ', '').split(',')
-            tool_conf['file'] = t.find('file').attrib.get('path', '')
-    return tool_conf
-
 def _clean_genome_directory():
     """Remove any existing sequence information in the current directory.
     """
     for dirname in GENOME_INDEXES_SUPPORTED + DEFAULT_GENOME_INDEXES:
-        if exists(dirname):
-            run("rm -rf %s" % dirname)
+        if env.safe_exists(dirname):
+            env.safe_run("rm -rf %s" % dirname)
 
 def _move_seq_files(ref_file, base_zips, seq_dir):
-    if not exists(seq_dir):
-        run('mkdir %s' % seq_dir)
+    if not env.safe_exists(seq_dir):
+        env.safe_run('mkdir %s' % seq_dir)
     for move_file in [ref_file] + base_zips:
-        if exists(move_file):
-            run("mv %s %s" % (move_file, seq_dir))
+        if env.safe_exists(move_file):
+            env.safe_run("mv %s %s" % (move_file, seq_dir))
     path, fname = os.path.split(ref_file)
     moved_ref = os.path.join(path, seq_dir, fname)
-    assert exists(moved_ref), moved_ref
+    assert env.safe_exists(moved_ref), moved_ref
     return moved_ref
-
-def _update_loc_file(ref_file, line_parts):
-    """Add a reference to the given genome to the base index file.
-    """
-    if env.galaxy_base is not None:
-        tools_dir = os.path.join(env.galaxy_base, "tool-data")
-        if not exists(tools_dir):
-            run("mkdir -p %s" % tools_dir)
-            put(env.tool_data_table_conf_file,
-                os.path.join(env.galaxy_base, "tool_data_table_conf.xml"))
-        add_str = "\t".join(line_parts)
-        with cd(tools_dir):
-            if not exists(ref_file):
-                run("touch %s" % ref_file)
-            if not contains(ref_file, add_str):
-                append(ref_file, add_str)
 
 # ## Indexing for specific aligners
 
 def _index_w_command(dir_name, command, ref_file, pre=None, post=None, ext=None):
     """Low level function to do the indexing and paths with an index command.
     """
+    path_export = _get_path_export()
     index_name = os.path.splitext(os.path.basename(ref_file))[0]
     if ext is not None: index_name += ext
     full_ref_path = os.path.join(os.pardir, ref_file)
-    if not exists(dir_name):
-        run("mkdir %s" % dir_name)
+    if not env.safe_exists(dir_name):
+        env.safe_run("mkdir %s" % dir_name)
         with cd(dir_name):
             if pre:
                 full_ref_path = pre(full_ref_path)
-            run(command.format(ref_file=full_ref_path, index_name=index_name))
+            env.safe_run(path_export + command.format(ref_file=full_ref_path, index_name=index_name))
             if post:
                 post(full_ref_path)
     return os.path.join(dir_name, index_name)
-
-def _index_picard(ref_file):
-    """Provide a Picard style dict index file for a reference genome.
-    """
-    index_name = "%s.dict" % os.path.splitext(ref_file)[0]
-    try:
-        picard_jar = os.path.join(env.picard_home, "CreateSequenceDictionary.jar")
-    except AttributeError:
-        picard_jar = None
-    if picard_jar and exists(picard_jar) and not exists(index_name):
-        cl = ["java", "-jar", picard_jar]
-        opts = ["%s=%s" % (x, y) for x, y in [("REFERENCE", ref_file),
-                                              ("OUTPUT", index_name)]]
-        run(" ".join(cl + opts))
-    return index_name
 
 @_if_installed("faToTwoBit")
 def _index_twobit(ref_file):
@@ -565,21 +626,27 @@ def _index_bowtie(ref_file):
 def _index_bowtie2(ref_file):
     dir_name = "bowtie2"
     cmd = "bowtie2-build {ref_file} {index_name}"
-    return _index_w_command(dir_name, cmd, ref_file)
+    out_suffix = _index_w_command(dir_name, cmd, ref_file)
+    bowtie_link = os.path.normpath(os.path.join(os.path.dirname(ref_file), os.path.pardir,
+                                                out_suffix + ".fa"))
+    relative_ref_file = os.path.relpath(ref_file, os.path.dirname(bowtie_link))
+    if not env.safe_exists(bowtie_link):
+        env.safe_run("ln -sf %s %s" % (relative_ref_file, bowtie_link))
+    return out_suffix
 
 def _index_bwa(ref_file):
     dir_name = "bwa"
     local_ref = os.path.split(ref_file)[-1]
-    if not exists(dir_name):
-        run("mkdir %s" % dir_name)
+    if not env.safe_exists(dir_name):
+        env.safe_run("mkdir %s" % dir_name)
         with cd(dir_name):
-            run("ln -s %s" % os.path.join(os.pardir, ref_file))
+            env.safe_run("ln -sf %s" % os.path.join(os.pardir, ref_file))
             with settings(warn_only=True):
-                result = run("bwa index -a bwtsw %s" % local_ref)
+                result = env.safe_run("bwa index -a bwtsw %s" % local_ref)
             # work around a bug in bwa indexing for small files
             if result.failed:
-                run("bwa index %s" % local_ref)
-            run("rm -f %s" % local_ref)
+                env.safe_run("bwa index %s" % local_ref)
+            env.safe_run("rm -f %s" % local_ref)
     return os.path.join(dir_name, local_ref)
 
 def _index_maq(ref_file):
@@ -587,10 +654,10 @@ def _index_maq(ref_file):
     cmd = "maq fasta2bfa {ref_file} {index_name}"
     def link_local(ref_file):
         local = os.path.basename(ref_file)
-        run("ln -s {0} {1}".format(ref_file, local))
+        env.safe_run("ln -sf {0} {1}".format(ref_file, local))
         return local
     def rm_local(local_file):
-        run("rm -f {0}".format(local_file))
+        env.safe_run("rm -f {0}".format(local_file))
     return _index_w_command(dir_name, cmd, ref_file, pre=link_local, post=rm_local)
 
 @_if_installed("novoindex")
@@ -608,10 +675,116 @@ def _index_novoalign_cs(ref_file):
 def _index_sam(ref_file):
     (ref_dir, local_file) = os.path.split(ref_file)
     with cd(ref_dir):
-        if not exists("%s.fai" % local_file):
-            run("samtools faidx %s" % local_file)
-    _index_picard(ref_file)
+        if not env.safe_exists("%s.fai" % local_file):
+            env.safe_run("samtools faidx %s" % local_file)
+    galaxy.index_picard(ref_file)
     return ref_file
+
+@_if_installed("STAR")
+def _index_star(ref_file):
+    (ref_dir, local_file) = os.path.split(ref_file)
+    GenomeLength = os.path.getsize(ref_file)
+    Nbases = int(round(min(14, log(GenomeLength, 2)/2 - 2), 0))
+    dir_name = os.path.normpath(os.path.join(ref_dir, os.pardir, "star"))
+    # if there is a large number of contigs, scale nbits down
+    # https://github.com/alexdobin/STAR/issues/103#issuecomment-173009628
+    # if there is a small genome, scale nbits down
+    # https://groups.google.com/forum/#!topic/rna-star/9g8Uoe1Igho
+    cmd = 'grep ">" {ref_file} | wc -l'.format(ref_file=ref_file)
+    nrefs = float(subprocess.check_output(cmd, shell=True))
+    nbits = int(round(min(14, log(GenomeLength/nrefs, 2), log(GenomeLength, 2)/2 - 1)))
+    # first we estimate the number of bits we need to hold the genome and allocate
+    # double that plus some padding to build the index
+    mem = ((GenomeLength + 1) / nbits + 1) * nbits
+    mem = (mem + 10000) * 2
+    mem = mem + mem / 3
+    mem = max(mem, 30000000000)
+    try:
+        cpu = env.cores
+    except:
+        cpu = 1
+    cmd = ("STAR --genomeDir %s --genomeFastaFiles {ref_file} "
+           "--runThreadN %s "
+           "--limitGenomeGenerateRAM %s "
+           "--genomeChrBinNbits %s "
+           "--runMode genomeGenerate "
+           "--genomeSAindexNbases %s" % (dir_name, str(cpu), str(mem), Nbases,
+                                         nbits))
+    if not env.safe_exists(os.path.join(dir_name, "SA")):
+        _index_w_command(dir_name, cmd, ref_file)
+    return dir_name
+
+@_if_installed("hisat2-build")
+def _index_hisat2(ref_file):
+    build = os.path.splitext(os.path.basename(ref_file))[0]
+    (ref_dir, local_file) = os.path.split(ref_file)
+    gtf_file = os.path.join(ref_dir, os.pardir, "rnaseq", "ref-transcripts.gtf")
+    dir_name = os.path.normpath(os.path.join(ref_dir, os.pardir, "hisat2"))
+    index_prefix = os.path.join(dir_name, build)
+    try:
+        cpu = env.cores
+    except:
+        cpu = 1
+    cmd = "hisat2-build -p {cpu} "
+
+    exons_file = index_prefix + ".exons"
+    splicesites_file = index_prefix + ".splicesites"
+    def _get_exons_and_splicesites(ref_path):
+        path_export = _get_path_export()
+        with open(exons_file, "w") as out_handle:
+            exons_cmd = ["hisat2_extract_exons.py", gtf_file]
+            subprocess.check_call(path_export + " ".join(exons_cmd), stdout=out_handle, shell=True)
+        with open(splicesites_file, "w") as out_handle:
+            splicesites_cmd = ["hisat2_extract_splice_sites.py", gtf_file]
+            subprocess.check_call(path_export + " ".join(splicesites_cmd), stdout=out_handle, shell=True)
+        return ref_path
+
+    pre_func = None
+    if not os.path.exists(gtf_file):
+        print "%s not found, skipping creating the exons file." % (gtf_file)
+    else:
+        cmd += "--exon {exons_file} --ss {splicesites_file} "
+        pre_func = _get_exons_and_splicesites
+    cmd += "{ref_file} {index_prefix}"
+    cmd = cmd.format(**locals())
+    if not env.safe_exists(os.path.join(dir_name + ".1.ht2")):
+        _index_w_command(dir_name, cmd, ref_file, pre=pre_func)
+    return dir_name
+
+def _index_snap(ref_file):
+    """Snap indexing is computationally expensive. Requests all cores and 64Gb of memory.
+    """
+    dir_name = "snap"
+    index_name = os.path.splitext(os.path.basename(ref_file))[0]
+    org_arg = "-hg19" if index_name in ["hg19", "GRCh37"] else ""
+    cmd = "snap-aligner index {ref_file} {dir_name} -bSpace {org_arg}"
+    if not env.safe_exists(os.path.join(dir_name, "GenomeIndex")):
+        env.safe_run(cmd.format(**locals()))
+    return dir_name
+
+def _get_path_export():
+    """Ensure PATH points to local install directory.
+    """
+    path_export = ""
+    if hasattr(env, "system_install") and env.system_install:
+        local_bin = os.path.join(env.system_install, 'bin')
+        if env.safe_exists(local_bin):
+            path_export = "export PATH=%s:$PATH && " % local_bin
+    return path_export
+
+def _index_rtg(ref_file):
+    """Perform indexing for use with Real Time Genomics tools.
+
+    https://github.com/RealTimeGenomics/rtg-tools
+    """
+    path_export = _get_path_export()
+    dir_name = "rtg"
+    index_name = "%s.sdf" % os.path.splitext(os.path.basename(ref_file))[0]
+    if not env.safe_exists(os.path.join(dir_name, index_name, "done")):
+        cmd = ("{path_export}export RTG_JAVA_OPTS='-Xms1g' && export RTG_MEM=2g && "
+               "rtg format -o {dir_name}/{index_name} {ref_file}")
+        env.safe_run(cmd.format(**locals()))
+    return dir_name
 
 @_if_installed("MosaikJump")
 def _index_mosaik(ref_file):
@@ -621,76 +794,33 @@ def _index_mosaik(ref_file):
     def create_jumpdb(ref_file):
         jmp_base = os.path.splitext(os.path.basename(ref_file))[0]
         dat_file = "{0}.dat".format(jmp_base)
-        if not exists("{0}_keys.jmp".format(jmp_base)):
+        if not env.safe_exists("{0}_keys.jmp".format(jmp_base)):
             cmd = "export MOSAIK_TMP=`pwd` && MosaikJump -hs {hash_size} -ia {ref_file} -out {index_name}".format(
                 hash_size=hash_size, ref_file=dat_file, index_name=jmp_base)
-            run(cmd)
+            env.safe_run(cmd)
     return _index_w_command(dir_name, cmd, ref_file,
                             post=create_jumpdb, ext=".dat")
 
-@_if_installed("MakeLookupTable")
-def _index_arachne(ref_file):
-    """Index for Broad's Arachne aligner.
-    """
-    dir_name = "arachne"
-    ref_base = os.path.splitext(os.path.split(ref_file)[-1])[0]
-    if not exists(dir_name):
-        run("mkdir %s" % dir_name)
-        with cd(dir_name):
-            run("ln -s %s" % os.path.join(os.pardir, ref_file))
-            ref_file = os.path.split(ref_file)[-1]
-            run("MakeLookupTable SOURCE=%s OUT_HEAD=%s" % (ref_file,
-                ref_base))
-            run("fastaHeaderSizes FASTA=%s HEADER_SIZES=%s.headerSizes" %
-                    (ref_file, ref_file))
-            #run("rm -f %s" % ref_file)
-    return os.path.join(dir_name, ref_base)
+# -- Retrieve using GGD recipes
 
-@_if_installed("squashGenome")
-def _index_eland(ref_file):
-    """Index for Solexa's Eland aligner.
-
-    This is nasty since Eland will choke on large files like the mm9 and h18
-    genomes. It also has a restriction on only having 24 larger reference 
-    files per directory. This indexes files with lots of shorter sequences (like
-    xenopus) as one file, and splits up other files, removing random and other
-    associated chromosomes to avoid going over the 24 file limit.
-    """
-    dir_name = "eland"
-    if not exists(dir_name):
-        run("mkdir %s" % dir_name)
-        num_refs = run("grep '^>' %s | wc -l" % ref_file)
-        # For a lot of reference sequences, Eland needs them in 1 file
-        if int(num_refs) > 239:
-            run("squashGenome %s %s" % (dir_name, ref_file))
-        # For large reference sequences, squash fails and need them split up
-        else:
-            tmp_dir = "tmp_seqparts"
-            run("mkdir %s" % tmp_dir)
-            run("seqretsplit -sequence %s -osdirectory2 %s -outseq ." %
-                    (ref_file, tmp_dir))
-            with cd(tmp_dir):
-                result = run("ls *.fasta")
-                result = result.split("\n")
-            seq_files = [os.path.join(tmp_dir, f) for f in result]
-            run("squashGenome %s %s" % (dir_name, " ".join(seq_files)))
-            run("rm -rf %s" % tmp_dir)
-            # Eland can only handle up to 24 reference files in a directory
-            # If we have more, remove any with *random* in the name to get
-            # below. This sucks, but seemingly no way around it because
-            # Eland will choke on large reference files
-            if int(num_refs) > 24:
-                with cd(dir_name):
-                    for remove_re in ["*random*", "*_hap*", "chrun_*"]:
-                        with settings(warn_only=True):
-                            run("rm -f %s" % remove_re)
-                    new_count = run("ls | wc -l")
-                    # Human is still too big, need to remove chromosome M
-                    if int(new_count) // 2 > 24:
-                        with settings(warn_only=True):
-                            run("rm -f chrm*")
+def _install_with_ggd(env, manager, gid, recipe):
+    assert env.hosts == ["localhost"], "GGD recipes only work for local runs"
+    recipe_dir = os.path.normpath(os.path.join(os.path.dirname(__file__),
+                                               os.pardir, os.pardir, "ggd-recipes"))
+    recipe_file = os.path.join(recipe_dir, gid, "%s.yaml" % recipe)
+    if os.path.exists(recipe_file):
+        ggd.install_recipe(env.cwd, recipe_file, gid)
+    else:
+        raise NotImplementedError("GGD recipe not available for %s %s" % (gid, recipe))
 
 # -- Genome upload and download to Amazon s3 buckets
+
+def _download_s3_index(env, manager, gid, idx):
+    env.logger.info("Downloading genome from s3: {0} {1}".format(gid, idx))
+    url = "https://s3.amazonaws.com/biodata/genomes/%s-%s.tar.xz" % (gid, idx)
+    out_file = shared._remote_fetch(env, url)
+    env.safe_run("xz -dc %s | tar -xvpf -" % out_file)
+    env.safe_run("rm -f %s" % out_file)
 
 def _download_genomes(genomes, genome_indexes):
     """Download a group of genomes from Amazon s3 bucket.
@@ -698,20 +828,16 @@ def _download_genomes(genomes, genome_indexes):
     genome_dir = _make_genome_dir()
     for (orgname, gid, manager) in genomes:
         org_dir = os.path.join(genome_dir, orgname, gid)
-        if not exists(org_dir):
-            run('mkdir -p %s' % org_dir)
+        if not env.safe_exists(org_dir):
+            env.safe_run('mkdir -p %s' % org_dir)
         for idx in genome_indexes:
-            env.logger.info("Downloading genome {0} to {1}".format(gid, org_dir))
             with cd(org_dir):
-                if not exists(idx):
-                    url = "https://s3.amazonaws.com/biodata/genomes/%s-%s.tar.xz" % (gid, idx)
-                    run("wget --no-check-certificate %s" % url)
-                    run("xz -dc %s | tar -xvpf -" % os.path.basename(url))
-                    run("rm -f %s" % os.path.basename(url))
+                if not env.safe_exists(idx):
+                    _download_s3_index(env, manager, gid, idx)
         ref_file = os.path.join(org_dir, "seq", "%s.fa" % gid)
-        if not exists(ref_file):
+        if not env.safe_exists(ref_file):
             ref_file = os.path.join(org_dir, "seq", "%s.fa" % manager._name)
-        assert exists(ref_file), ref_file
+        assert env.safe_exists(ref_file), ref_file
         cur_indexes = manager.config.get("indexes", genome_indexes)
         _index_to_galaxy(org_dir, ref_file, gid, cur_indexes, manager.config)
 
@@ -733,12 +859,13 @@ def _upload_genomes(genomes, genome_indexes):
 def _upload_to_s3(tarball, bucket):
     """Upload the genome tarball to s3.
     """
-    upload_script = os.path.join(os.path.dirname(__file__), "utils", "s3_multipart_upload.py")
+    upload_script = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
+                                 "utils", "s3_multipart_upload.py")
     s3_key_name = os.path.join("genomes", os.path.basename(tarball))
     if not bucket.get_key(s3_key_name):
         gb_size = int(run("du -sm %s" % tarball).split()[0]) / 1000.0
         print "Uploading %s %.1fGb" % (s3_key_name, gb_size)
-        cl = ["python2.6", upload_script, tarball, bucket.name, s3_key_name, "--public"]
+        cl = ["python", upload_script, tarball, bucket.name, s3_key_name, "--public"]
         subprocess.check_call(cl)
 
 def _tar_directory(dir, tar_name):
@@ -746,10 +873,10 @@ def _tar_directory(dir, tar_name):
     """
     base_dir, tar_dir = os.path.split(dir)
     tarball = os.path.join(base_dir, "%s.tar.xz" % tar_name)
-    if not exists(tarball):
+    if not env.safe_exists(tarball):
         with cd(base_dir):
-            run("tar -cvpf - %s | xz -zc - > %s" % (tar_dir,
-                                                    os.path.basename(tarball)))
+            env.safe_run("tar -cvpf - %s | xz -zc - > %s" % (tar_dir,
+                                                             os.path.basename(tarball)))
     return tarball
 
 def _clean_directory(dir, gid):
@@ -759,15 +886,15 @@ def _clean_directory(dir, gid):
     bowtie_ln = os.path.join(dir, "bowtie", "%s.fa" % gid)
     maq_ln = os.path.join(dir, "maq", "%s.fa" % gid)
     for to_remove in [bowtie_ln, maq_ln]:
-        if exists(to_remove):
-            run("rm -f %s" % to_remove)
+        if env.safe_exists(to_remove):
+            env.safe_run("rm -f %s" % to_remove)
     # remove any downloaded original sequence files
     remove_exts = ["*.gz", "*.zip"]
     with cd(os.path.join(dir, "seq")):
         for rext in remove_exts:
-            fnames = run("find . -name '%s'" % rext)
+            fnames = env.safe_run("find . -name '%s'" % rext)
             for fname in (f.strip() for f in fnames.split("\n") if f.strip()):
-                run("rm -f %s" % fname)
+                env.safe_run("rm -f %s" % fname)
 
 # == Liftover files
 
@@ -777,8 +904,8 @@ def _data_liftover(lift_over_genomes):
     Does not install liftOver binaries automatically.
     """
     lo_dir = os.path.join(env.data_files, "liftOver")
-    if not exists(lo_dir):
-        run("mkdir %s" % lo_dir)
+    if not env.safe_exists(lo_dir):
+        env.safe_run("mkdir %s" % lo_dir)
     lo_base_url = "ftp://hgdownload.cse.ucsc.edu/goldenPath/%s/liftOver/%s"
     lo_base_file = "%sTo%s.over.chain.gz"
     for g1 in lift_over_genomes:
@@ -788,17 +915,16 @@ def _data_liftover(lift_over_genomes):
             non_zip = os.path.splitext(cur_file)[0]
             worked = False
             with cd(lo_dir):
-                if not exists(non_zip):
-                    with settings(warn_only=True):
-                        result = run("wget %s" % (lo_base_url % (g1, cur_file)))
+                if not env.safe_exists(non_zip):
+                    result = shared._remote_fetch(env, "%s" % (lo_base_url % (g1, cur_file)), allow_fail=True)
                     # Lift over back and forths don't always exist
                     # Only move forward if we found the file
-                    if not result.failed:
+                    if result:
                         worked = True
-                        run("gunzip %s" % cur_file)
+                        env.safe_run("gunzip %s" % result)
             if worked:
                 ref_parts = [g1, g2, os.path.join(lo_dir, non_zip)]
-                _update_loc_file("liftOver.loc", ref_parts)
+                galaxy.update_loc_file("liftOver.loc", ref_parts)
 
 # == UniRef
 def _data_uniref():
@@ -816,16 +942,16 @@ def _data_uniref():
                "current_release/uniref/%s/%s"
     for uniref_db in ["uniref50", "uniref90", "uniref100"]:
         work_dir = os.path.join(env.data_files, "uniref", uniref_db)
-        if not exists(work_dir):
-            run("mkdir -p %s" % work_dir)
+        if not env.safe_exists(work_dir):
+            env.safe_run("mkdir -p %s" % work_dir)
         base_work_url = base_url % (uniref_db, uniref_db)
         fasta_url = base_work_url + ".fasta.gz"
         base_file = os.path.splitext(os.path.basename(fasta_url))[0]
         with cd(work_dir):
-            if not exists(base_file):
-                run("wget -c %s" % fasta_url)
-                run("gunzip %s" % os.path.basename(fasta_url))
-                run("wget %s" % (base_work_url + ".release_note"))
+            if not env.safe_exists(base_file):
+                out_file = shared._remote_fetch(env, fasta_url)
+                env.safe_run("gunzip %s" % out_file)
+                shared._remote_fetch(env, base_work_url + ".release_note")
         _index_blast_db(work_dir, base_file, "prot")
 
 def _index_blast_db(work_dir, base_file, db_type):
@@ -835,56 +961,30 @@ def _index_blast_db(work_dir, base_file, db_type):
     db_name = os.path.splitext(base_file)[0]
     with cd(work_dir):
         if not reduce(operator.or_,
-            (exists("%s.%s" % (db_name, ext)) for ext in type_to_ext[db_type])):
-            run("makeblastdb -in %s -dbtype %s -out %s" %
-                    (base_file, db_type, db_name))
+            (env.safe_exists("%s.%s" % (db_name, ext)) for ext in type_to_ext[db_type])):
+            env.safe_run("makeblastdb -in %s -dbtype %s -out %s" %
+                         (base_file, db_type, db_name))
 
 
-# == Not used -- takes up too much space and time to index
-
-def _index_bfast(ref_file):
-    """Indexes bfast in color and nucleotide space for longer reads.
-
-    This preps for 40+bp sized reads, which is bfast's strength.
+def get_index_fn(index):
     """
-    dir_name = "bfast"
-    window_size = 14
-    bfast_nt_masks = [
-   "1111111111111111111111",
-   "1111101110111010100101011011111",
-   "1011110101101001011000011010001111111",
-   "10111001101001100100111101010001011111",
-   "11111011011101111011111111",
-   "111111100101001000101111101110111",
-   "11110101110010100010101101010111111",
-   "111101101011011001100000101101001011101",
-   "1111011010001000110101100101100110100111",
-   "1111010010110110101110010110111011",
-    ]
-    bfast_color_masks = [
-    "1111111111111111111111",
-    "111110100111110011111111111",
-    "10111111011001100011111000111111",
-    "1111111100101111000001100011111011",
-    "111111110001111110011111111",
-    "11111011010011000011000110011111111",
-    "1111111111110011101111111",
-    "111011000011111111001111011111",
-    "1110110001011010011100101111101111",
-    "111111001000110001011100110001100011111",
-    ]
-    local_ref = os.path.split(ref_file)[-1]
-    if not exists(dir_name):
-        run("mkdir %s" % dir_name)
-        with cd(dir_name):
-            run("ln -s %s" % os.path.join(os.pardir, ref_file))
-            # nucleotide space
-            run("bfast fasta2brg -f %s -A 0" % local_ref)
-            for i, mask in enumerate(bfast_nt_masks):
-                run("bfast index -d 1 -n 4 -f %s -A 0 -m %s -w %s -i %s" %
-                        (local_ref, mask, window_size, i + 1))
-            # colorspace
-            run("bfast fasta2brg -f %s -A 1" % local_ref)
-            for i, mask in enumerate(bfast_color_masks):
-                run("bfast index -d 1 -n 4 -f %s -A 1 -m %s -w %s -i %s" %
-                        (local_ref, mask, window_size, i + 1))
+    return the index function for an index, if it is missing return a function
+    that is a no-op
+    """
+    return INDEX_FNS.get(index, lambda x: None)
+
+INDEX_FNS = {
+    "seq": _index_sam,
+    "bwa": _index_bwa,
+    "bowtie": _index_bowtie,
+    "bowtie2": _index_bowtie2,
+    "maq": _index_maq,
+    "mosaik": _index_mosaik,
+    "novoalign": _index_novoalign,
+    "novoalign_cs": _index_novoalign_cs,
+    "ucsc": _index_twobit,
+    "star": _index_star,
+    "snap": _index_snap,
+    "rtg": _index_rtg,
+    "hisat2": _index_hisat2
+    }
